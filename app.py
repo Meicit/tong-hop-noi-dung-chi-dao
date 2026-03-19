@@ -6,67 +6,79 @@ import pandas as pd
 import io
 import json
 
-# --- CẤU HÌNH ---
-st.set_page_config(page_title="Khai thác Chỉ đạo AI", layout="wide")
-st.title("📊 Khai thác & Quản lý Dữ liệu Chỉ đạo")
+# --- 1. CẤU HÌNH ---
+st.set_page_config(page_title="Khai thác dữ liệu văn bản", layout="wide")
+st.title("📊 Công cụ Khai thác & Xuất dữ liệu Chỉ đạo")
 
-def get_model():
+# Khởi tạo AI
+def init_ai():
+    if "GEMINI_API_KEY" not in st.secrets:
+        st.error("Chưa cấu hình API Key trong Secrets!")
+        st.stop()
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     return genai.GenerativeModel('gemini-1.5-flash')
 
-model = get_model()
+model = init_ai()
 
-# --- HÀM ĐỌC FILE ---
-def extract_text(file):
+# --- 2. HÀM ĐỌC FILE ---
+def get_content(file):
     text = ""
-    if file.type == "application/pdf":
-        for page in PdfReader(file).pages: text += page.extract_text() + "\n"
-    else:
-        text = "\n".join([p.text for p in Document(file).paragraphs])
-    return text
+    try:
+        if file.type == "application/pdf":
+            pdf = PdfReader(file)
+            for page in pdf.pages: text += page.extract_text() + "\n"
+        else:
+            doc = Document(file)
+            text = "\n".join([p.text for p in doc.paragraphs])
+        return text.strip()
+    except Exception as e:
+        st.error(f"Lỗi đọc file: {e}")
+        return ""
 
-# --- GIAO DIỆN ---
-file = st.file_uploader("Tải văn bản để khai thác dữ liệu", type=["pdf", "docx"])
+# --- 3. GIAO DIỆN ---
+uploaded_file = st.file_uploader("Tải lên file văn bản", type=["pdf", "docx"])
 
-if file:
-    raw_text = extract_text(file)
+if uploaded_file:
+    raw_text = get_content(uploaded_file)
     
-    if st.button("🚀 Phân tích & Tạo file Excel"):
-        with st.spinner("AI đang cấu trúc hóa dữ liệu..."):
-            # Prompt yêu cầu AI trả về định dạng JSON chuẩn để làm bảng
-            prompt = f"""
-            Phân tích văn bản sau và trích xuất các nhiệm vụ. 
-            Trả về DUY NHẤT một định dạng JSON list như sau:
-            [{{"stt": 1, "nhiem_vu": "nội dung", "don_vi": "tên đơn vị", "thoi_han": "ngày/tháng"}}]
-            
-            Văn bản: {raw_text}
-            """
-            
-            try:
-                response = model.generate_content(prompt)
-                # Làm sạch phản hồi để lấy JSON
-                clean_json = response.text.replace('```json', '').replace('```', '').strip()
-                data = json.loads(clean_json)
+    if st.button("🚀 Phân tích và Trích xuất dữ liệu"):
+        if not raw_text:
+            st.warning("Không tìm thấy nội dung trong file.")
+        else:
+            with st.spinner("AI đang xử lý dữ liệu..."):
+                # Prompt yêu cầu JSON để dễ khai thác
+                prompt = f"""
+                Phân tích văn bản hành chính sau và trả về danh sách nhiệm vụ.
+                Yêu cầu trả về DUY NHẤT định dạng JSON (không kèm văn bản khác) theo mẫu:
+                [
+                  {{"STT": 1, "Nhiệm vụ": "nội dung", "Chủ trì": "đơn vị", "Thời hạn": "ngày tháng"}}
+                ]
+                Văn bản: {raw_text[:8000]}
+                """
                 
-                # Tạo Bảng (Pandas DataFrame)
-                df = pd.DataFrame(data)
-                df.columns = ['STT', 'Nội dung nhiệm vụ', 'Đơn vị thực hiện', 'Thời hạn']
+                try:
+                    response = model.generate_content(prompt)
+                    res_text = response.text.replace('```json', '').replace('```', '').strip()
+                    
+                    # Chuyển đổi sang DataFrame
+                    data = json.loads(res_text)
+                    df = pd.DataFrame(data)
+                    
+                    st.subheader("📋 Danh mục nhiệm vụ trích xuất")
+                    st.dataframe(df, use_container_width=True)
+                    
+                    # --- XỬ LÝ XUẤT EXCEL ---
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        df.to_excel(writer, index=False, sheet_name='ChiDao')
+                    
+                    st.download_button(
+                        label="📥 Tải về file Excel (.xlsx)",
+                        data=output.getvalue(),
+                        file_name=f"Trich_xuat_{uploaded_file.name}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
                 
-                st.subheader("📋 Bảng nhiệm vụ đã trích xuất")
-                st.dataframe(df, use_container_width=True)
-                
-                # --- TẠO FILE EXCEL ĐỂ TẢI VỀ ---
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name='NhiemVu')
-                
-                st.download_button(
-                    label="📥 Tải về file Excel (.xlsx)",
-                    data=buffer.getvalue(),
-                    file_name=f"Danh_sach_nhiem_vu_{file.name}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                
-            except Exception as e:
-                st.error(f"Lỗi khi cấu trúc hóa dữ liệu: {e}")
-                st.info("AI có thể không trả về đúng định dạng bảng, hãy thử lại.")
+                except Exception as e:
+                    st.error("AI không trả về định dạng bảng chuẩn. Dưới đây là nội dung chi tiết:")
+                    st.info(response.text)
